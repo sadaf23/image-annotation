@@ -1,0 +1,6 @@
+Original_Image,Generated_Image,Plausibility,Date
+ham_10000_train_flat/akiec_image_1.jpg,genrated_images_flat/generated_akiec_image_1_0.png,Plausible,24-06-2025
+ham_10000_train_flat/akiec_image_1.jpg,genrated_images_flat/generated_akiec_image_1_1.png,Plausible,24-06-2025
+ham_10000_train_flat/akiec_image_1.jpg,genrated_images_flat/generated_akiec_image_1_2.png,Plausible,24-06-2025
+ham_10000_train_flat/akiec_image_1.jpg,genrated_images_flat/generated_akiec_image_1_3.png,Implausible,24-06-2025
+ham_10000_train_flat/akiec_image_1.jpg,genrated_images_flat/generated_akiec_image_1_4.png,Implausible,24-06-2025
