@@ -1,4 +1,6 @@
 import streamlit as st
+import sys
+sys.path.append("libs")
 from streamlit_image_zoom import image_zoom
 from PIL import Image
 import pandas as pd
