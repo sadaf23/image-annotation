@@ -1,38 +1,103 @@
 import streamlit as st
+st.set_page_config(page_title="Image Annotation Tool")
+
 import sys
-sys.path.append("libs")
-from streamlit_image_zoom import image_zoom
-from PIL import Image
-import pandas as pd
+import json
 import os
+import re
+import pandas as pd
 import requests
 from io import BytesIO
 from io import StringIO
 from datetime import datetime
-import re
 import boto3
 from dotenv import load_dotenv
+from botocore.exceptions import ClientError
+from streamlit_image_zoom import image_zoom
+try:
+    from PIL import Image
+except ImportError:
+    st.error("Pillow library is not installed. Please install it using: pip install Pillow")
+    Image = None
+
+sys.path.append("project")
 
 load_dotenv()
 
+# -------------- Load Class Mappings ----------------
+
+def load_class_mappings():
+    """Load class name mappings from JSON file."""
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        json_path = os.path.join(script_dir, "class_mappings.json")
+        with open(json_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error("Class mappings JSON file not found.")
+        return {}
+    except Exception as e:
+        st.error(f"Error loading class mappings: {e}")
+        return {}
+
+CLASS_MAPPINGS = load_class_mappings()
+
+def get_class_name(url):
+    """Extract class short form from URL and map to full form."""
+    try:
+        match = re.search(r"/[^/]+/([^_]+)_image_", url)
+        if match:
+            short_form = match.group(1)
+            return CLASS_MAPPINGS.get(short_form, "Unknown")
+        return "Unknown"
+    except Exception as e:
+        st.error(f"Error extracting class name from URL: {e}")
+        return "Unknown"
+
 # -------------- AWS + S3 Config ----------------
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-    region_name=os.getenv("AWS_REGION"),
-)
-BUCKET_NAME = os.getenv("S3_BUCKET")
+try:
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.getenv("AWS_REGION"),
+    )
+    BUCKET_NAME = os.getenv("S3_BUCKET")
+except Exception as e:
+    st.error(f"Failed to initialize S3 client: {e}")
+    BUCKET_NAME = None
+
+def test_s3_connection():
+    """Test S3 connectivity silently, only display errors."""
+    if BUCKET_NAME is None:
+        st.error("S3 bucket not configured.")
+        return
+    try:
+        s3.list_objects_v2(Bucket=BUCKET_NAME, MaxKeys=1)
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        st.error(f"S3 connection failed: {error_code} - {e.response['Error']['Message']}")
+    except Exception as e:
+        st.error(f"S3 connection failed: {e}")
 
 def upload_csv_to_s3(local_path, s3_key):
+    if BUCKET_NAME is None:
+        st.error("S3 bucket not configured.")
+        return
     try:
         s3.upload_file(local_path, BUCKET_NAME, s3_key)
         print(f"✅ Uploaded {s3_key} to S3")
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        st.error(f"Failed to upload CSV to S3: {error_code} - {e.response['Error']['Message']}")
     except Exception as e:
-        print(f"⚠ Failed to upload CSV to S3: {e}")
+        st.error(f"Failed to upload CSV to S3: {e}")
 
 def download_csv_from_s3(s3_key):
     """Download CSV from S3 and return as a pandas DataFrame."""
+    if BUCKET_NAME is None:
+        st.error("S3 bucket not configured.")
+        return pd.DataFrame(columns=["Original_Image", "Generated_Image", "Plausibility", "Date"])
     try:
         response = s3.get_object(Bucket=BUCKET_NAME, Key=s3_key)
         csv_content = response['Body'].read().decode('utf-8')
@@ -40,12 +105,15 @@ def download_csv_from_s3(s3_key):
         return df
     except s3.exceptions.NoSuchKey:
         return pd.DataFrame(columns=["Original_Image", "Generated_Image", "Plausibility", "Date"])
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        st.error(f"Failed to download CSV from S3: {error_code} - {e.response['Error']['Message']}")
+        return pd.DataFrame(columns=["Original_Image", "Generated_Image", "Plausibility", "Date"])
     except Exception as e:
-        print(f"⚠ Failed to download CSV from S3: {e}")
+        st.error(f"Failed to download CSV from S3: {e}")
         return pd.DataFrame(columns=["Original_Image", "Generated_Image", "Plausibility", "Date"])
 
-# ---------------- Streamlit Config ----------------
-st.set_page_config(page_title="Image Annotation Tool")
+
 
 # ---------------- Session State Setup ----------------
 if "selected_task" not in st.session_state:
@@ -76,11 +144,22 @@ if st.session_state.current_index >= len(image_sets):
 # ---------------- Image Fetching ----------------
 @st.cache_data(show_spinner=False)
 def load_image(url):
+    if Image is None:
+        st.error("Cannot load images: Pillow library is missing.")
+        return None
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
         img = Image.open(BytesIO(response.content)).convert("RGB")
         return img
-    except Exception:
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to load image {url}: {e}")
+        return None
+    except NameError as e:
+        st.error(f"Image processing error: {e}. Ensure Pillow is installed.")
+        return None
+    except Exception as e:
+        st.error(f"Error processing image {url}: {e}")
         return None
 
 # ---------------- CSV Saving ----------------
@@ -122,9 +201,10 @@ def get_total_fully_annotated():
         return 0
     try:
         counts = df.groupby("Original_Image")["Generated_Image"].count()
-        fully_done = counts[counts == 5]  # Assumes 5 generated images per set
+        fully_done = counts[counts == 5]
         return len(fully_done)
-    except Exception:
+    except Exception as e:
+        st.error(f"Error counting fully annotated images: {e}")
         return 0
 
 # ---------------- Navigation ----------------
@@ -154,7 +234,7 @@ def show_navigation():
             df = download_csv_from_s3(S3_CSV_KEY)
             annotations = df[df["Original_Image"] == original_key]
             generated_keys = [extract_key(url) for url in current_set["generated"]]
-            if len(annotations) == len(generated_keys):  # All 5 annotated
+            if len(annotations) == len(generated_keys):
                 st.session_state.completed_sets.add(index)
                 if st.session_state.current_index < len(image_sets) - 1:
                     st.session_state.current_index += 1
@@ -162,18 +242,64 @@ def show_navigation():
             else:
                 st.warning("⚠ Please annotate all 5 generated images before proceeding.")
 
+# ---------------- Render Generated Image Fragment ----------------
+@st.fragment
+def render_generated_image(index, gen_url, i, original_url, annotations_df):
+    def extract_key(url):
+        match = re.search(r"\.com/(.+?)(?:\?|$)", url)
+        return match.group(1) if match else url
+
+    fragment_key = f"gen_image_{index}_{i}"
+
+    with st.container(key=fragment_key):
+        cols = st.columns([2, 3])
+        with cols[0]:
+            gen_img = load_image(gen_url)
+            if gen_img:
+                gw, gh = gen_img.size
+                gh_scaled = int(gh * 300 / gw)
+                image_zoom(gen_img, size=(300, gh_scaled), zoom_factor=2.5)
+            else:
+                st.warning(f"Could not load generated image {i+1}")
+
+        with cols[1]:
+            key = (index, i)
+            gen_key = extract_key(gen_url)
+            
+            if key not in st.session_state.selections:
+                existing_annotation = annotations_df[annotations_df["Generated_Image"] == gen_key]
+                if not existing_annotation.empty:
+                    st.session_state.selections[key] = existing_annotation.iloc[0]["Plausibility"]
+
+            selected = st.session_state.selections.get(key)
+
+            margin_top = 60
+            st.write(f"<div style='height: {margin_top}px;'></div>", unsafe_allow_html=True)
+
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                label = "✔ Plausible" if selected == "Plausible" else "Plausible"
+                plausible_key = f"p_{index}_{i}_{gen_key[:10]}"
+                if st.button(label, key=plausible_key):
+                    st.session_state.selections[key] = "Plausible"
+                    save_selection_to_csv(original_url, gen_url, "Plausible")
+            with c2:
+                label = "✔ Implausible" if selected == "Implausible" else "Implausible"
+                implausible_key = f"ip_{index}_{i}_{gen_key[:10]}"
+                if st.button(label, key=implausible_key):
+                    st.session_state.selections[key] = "Implausible"
+                    save_selection_to_csv(original_url, gen_url, "Implausible")
+
 # ---------------- Main View ----------------
 def show_main_view():
     index = st.session_state.current_index
     current_set = image_sets[index]
 
-    # Load existing annotations for this set
     def extract_key(url):
         match = re.search(r"\.com/(.+?)(?:\?|$)", url)
         return match.group(1) if match else url
     original_key = extract_key(current_set["original"])
     df = download_csv_from_s3(S3_CSV_KEY)
-    annotations = df[df["Original_Image"] == original_key]
 
     st.markdown("### Original Image")
     col1, col2, col3 = st.columns([1, 4, 1])
@@ -183,55 +309,23 @@ def show_main_view():
             ow, oh = original_img.size
             oh_scaled = int(oh * 400 / ow)
             image_zoom(original_img, size=(400, oh_scaled), zoom_factor=2.5)
+            class_name = get_class_name(current_set["original"])
+            st.markdown(f"**Class: {class_name}**")
         else:
-            st.error("Could not load original image.")
+            st.error(f"Could not load original image: {current_set['original']}")
 
     st.markdown("---")
     st.markdown("### Generated Images")
     for i, gen_url in enumerate(current_set["generated"]):
-        with st.container():
-            cols = st.columns([2, 3])
-            with cols[0]:
-                gen_img = load_image(gen_url)
-                if gen_img:
-                    gw, gh = gen_img.size
-                    gh_scaled = int(gh * 300 / gw)
-                    image_zoom(gen_img, size=(300, gh_scaled), zoom_factor=2.5)
-                else:
-                    st.warning(f"Could not load generated image {i+1}")
-            with cols[1]:
-                key = (index, i)
-                gen_key = extract_key(gen_url)
-                
-                # Check if this generated image is already annotated
-                existing_annotation = annotations[annotations["Generated_Image"] == gen_key]
-                if not existing_annotation.empty:
-                    selected = existing_annotation.iloc[0]["Plausibility"]
-                    st.session_state.selections[key] = selected
-                else:
-                    selected = st.session_state.selections.get(key)
-
-                margin_top = 60
-                st.write(f"<div style='height: {margin_top}px;'></div>", unsafe_allow_html=True)
-
-                c1, c2 = st.columns([1, 1])
-                with c1:
-                    label = "✔ Plausible" if selected == "Plausible" else "Plausible"
-                    if st.button(label, key=f"p_{index}_{i}"):
-                        st.session_state.selections[key] = "Plausible"
-                        save_selection_to_csv(current_set["original"], gen_url, "Plausible")
-                        st.rerun()
-                with c2:
-                    label = "✔ Implausible" if selected == "Implausible" else "Implausible"
-                    if st.button(label, key=f"ip_{index}_{i}"):
-                        st.session_state.selections[key] = "Implausible"
-                        save_selection_to_csv(current_set["original"], gen_url, "Implausible")
-                        st.rerun()
+        render_generated_image(index, gen_url, i, current_set["original"], df)
 
     show_navigation()
 
 # ---------------- Run ----------------
 st.title("Image Annotation Tool")
 st.success(f"Annotated Images: {get_total_fully_annotated()}")
+
+# Test S3 connection silently at startup
+test_s3_connection()
 
 show_main_view()
