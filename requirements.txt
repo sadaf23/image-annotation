@@ -1,5 +1,5 @@
 streamlit==1.36.0
-streamlit-image-zoom==0.0.4
+git+https://github.com/treuille/streamlit-image-zoom.git
 Pillow==10.4.0
 pandas==2.2.2
 requests==2.32.3
