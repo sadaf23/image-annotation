@@ -165,7 +165,7 @@ def show_main_view():
     index = st.session_state.current_index
     current_set = image_sets[index]
 
-    # Load existing annotations for this set from S3
+    # Load existing annotations for this set
     def extract_key(url):
         match = re.search(r"\.com/(.+?)(?:\?|$)", url)
         return match.group(1) if match else url
